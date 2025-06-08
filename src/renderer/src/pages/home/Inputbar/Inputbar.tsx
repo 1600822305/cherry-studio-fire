@@ -29,10 +29,13 @@ import WebSearchService from '@renderer/services/WebSearchService'
 import { useAppDispatch } from '@renderer/store'
 import { setSearching } from '@renderer/store/runtime'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
+import { getInputBoxIcons, getVisibleInputBoxIcons, sortIconsByPosition } from '@renderer/pages/settings/DisplaySettings/inputBoxIconsUtils'
 import { Assistant, FileType, KnowledgeBase, KnowledgeItem, Model, Topic } from '@renderer/types'
 import type { MessageInputBaseParams } from '@renderer/types/newMessage'
 import { classNames, delay, formatFileSize, getFileExtension } from '@renderer/utils'
+import { formatQuotedText } from '@renderer/utils/formats'
 import { getFilesFromDropEvent } from '@renderer/utils/input'
+import { IpcChannel } from '@shared/IpcChannel'
 import { documentExts, imageExts, textExts } from '@shared/config/constant'
 import { Button, Tooltip } from 'antd'
 import TextArea, { TextAreaRef } from 'antd/es/input/TextArea'
@@ -74,9 +77,6 @@ import SendMessageButton from './SendMessageButton'
 import ThinkingButton, { ThinkingButtonRef } from './ThinkingButton'
 import TokenCount from './TokenCount'
 import WebSearchButton, { WebSearchButtonRef } from './WebSearchButton'
-
-// 导入自定义输入框图标工具函数
-import { getInputBoxIcons, getVisibleInputBoxIcons, sortIconsByPosition } from '@renderer/pages/settings/DisplaySettings/inputBoxIconsUtils'
 
 interface Props {
   assistant: Assistant
@@ -136,11 +136,9 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
 
   const [tokenCount, setTokenCount] = useState(0)
 
-  // 获取和处理输入框图标配置
+  // 计算输入框图标配置
   const inputBoxIcons = useMemo(() => {
     const allIcons = getInputBoxIcons()
-
-    // 设置条件状态
     const conditions = {
       showThinkingButton: isSupportedReasoningEffortModel(model) || isSupportedThinkingTokenModel(model),
       showKnowledgeIcon,
@@ -149,7 +147,6 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       showInputEstimatedTokens
     }
 
-    // 获取可见的图标
     const visibleIcons = getVisibleInputBoxIcons(allIcons, conditions)
 
     // 应用用户的自定义配置
@@ -162,11 +159,8 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       }))
       .filter((icon) => icon.visible)
 
-    // 按位置排序
     return sortIconsByPosition(configuredIcons)
-  }, [model, showKnowledgeIcon, activedMcpServers, showInputEstimatedTokens, inputBoxIconsConfig])
-
-
+  }, [model, showKnowledgeIcon, activedMcpServers.length, showInputEstimatedTokens, inputBoxIconsConfig])
 
   const quickPhrasesButtonRef = useRef<QuickPhrasesButtonRef>(null)
   const mentionModelsButtonRef = useRef<MentionModelsButtonRef>(null)
@@ -175,6 +169,8 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
   const attachmentButtonRef = useRef<AttachmentButtonRef>(null)
   const webSearchButtonRef = useRef<WebSearchButtonRef | null>(null)
   const thinkingButtonRef = useRef<ThinkingButtonRef | null>(null)
+
+
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const debouncedEstimate = useCallback(
@@ -570,6 +566,19 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
     setTimeout(() => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
   }, [addTopic, assistant, setActiveTopic, setModel])
 
+  const onQuote = useCallback(
+    (text: string) => {
+      const quotedText = formatQuotedText(text)
+      setText((prevText) => {
+        const newText = prevText ? `${prevText}\n${quotedText}\n` : `${quotedText}\n`
+        setTimeout(() => resizeTextArea(), 0)
+        return newText
+      })
+      textareaRef.current?.focus()
+    },
+    [resizeTextArea]
+  )
+
   const onPause = async () => {
     await pauseMessages()
   }
@@ -767,14 +776,24 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       }),
       EventEmitter.on(EVENT_NAMES.ADD_NEW_TOPIC, addNewTopic)
     ]
-    return () => unsubscribes.forEach((unsub) => unsub())
-  }, [addNewTopic, resizeTextArea])
+
+    // 监听引用事件
+    const quoteFromAnywhereRemover = window.electron?.ipcRenderer.on(
+      IpcChannel.App_QuoteToMain,
+      (_, selectedText: string) => onQuote(selectedText)
+    )
+
+    return () => {
+      unsubscribes.forEach((unsub) => unsub())
+      quoteFromAnywhereRemover?.()
+    }
+  }, [addNewTopic, onQuote])
 
   useEffect(() => {
-    if (!document.querySelector('.topview-fullscreen-container')) {
-      textareaRef.current?.focus()
-    }
+    textareaRef.current?.focus()
   }, [assistant, topic])
+
+
 
   useEffect(() => {
     setTimeout(() => resizeTextArea(), 0)
@@ -898,14 +917,13 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
   }
 
   const isExpended = expended || !!textareaHeight
-  const showThinkingButton = isSupportedThinkingTokenModel(model) || isSupportedReasoningEffortModel(model)
 
-  // 根据图标 ID 渲染对应的组件
-  const renderIconComponent = useCallback((iconId: string) => {
-    switch (iconId) {
+  // 根据图标配置渲染工具栏按钮
+  const renderToolbarButton = useCallback((icon: any) => {
+    switch (icon.id) {
       case 'new_topic':
         return (
-          <Tooltip placement="top" title={t('chat.input.new_topic', { Command: newTopicShortcut })} arrow>
+          <Tooltip key={icon.id} placement="top" title={t('chat.input.new_topic', { Command: newTopicShortcut })} arrow>
             <ToolbarButton type="text" onClick={addNewTopic}>
               <MessageSquareDiff size={19} />
             </ToolbarButton>
@@ -914,6 +932,7 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       case 'attachment':
         return (
           <AttachmentButton
+            key={icon.id}
             ref={attachmentButtonRef}
             model={model}
             files={files}
@@ -922,48 +941,60 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
           />
         )
       case 'thinking':
-        return showThinkingButton ? (
+        return (
           <ThinkingButton
+            key={icon.id}
             ref={thinkingButtonRef}
             model={model}
             assistant={assistant}
             ToolbarButton={ToolbarButton}
           />
-        ) : null
+        )
       case 'web_search':
-        return <WebSearchButton ref={webSearchButtonRef} assistant={assistant} ToolbarButton={ToolbarButton} />
+        return (
+          <WebSearchButton
+            key={icon.id}
+            ref={webSearchButtonRef}
+            assistant={assistant}
+            ToolbarButton={ToolbarButton}
+          />
+        )
       case 'knowledge_base':
-        return showKnowledgeIcon ? (
+        return (
           <KnowledgeBaseButton
+            key={icon.id}
             ref={knowledgeBaseButtonRef}
             selectedBases={selectedKnowledgeBases}
             onSelect={handleKnowledgeBaseSelect}
             ToolbarButton={ToolbarButton}
             disabled={files.length > 0}
           />
-        ) : null
+        )
       case 'mcp_tools':
-        return activedMcpServers.length > 0 ? (
+        return (
           <MCPToolsButton
+            key={icon.id}
             assistant={assistant}
             ref={mcpToolsButtonRef}
             ToolbarButton={ToolbarButton}
             setInputValue={setText}
             resizeTextArea={resizeTextArea}
           />
-        ) : null
+        )
       case 'generate_image':
-        return isGenerateImageModel(model) ? (
+        return (
           <GenerateImageButton
+            key={icon.id}
             model={model}
             assistant={assistant}
             onEnableGenerateImage={onEnableGenerateImage}
             ToolbarButton={ToolbarButton}
           />
-        ) : null
+        )
       case 'mention_models':
         return (
           <MentionModelsButton
+            key={icon.id}
             ref={mentionModelsButtonRef}
             mentionModels={mentionModels}
             onMentionModel={onMentionModel}
@@ -973,6 +1004,7 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       case 'quick_phrases':
         return (
           <QuickPhrasesButton
+            key={icon.id}
             ref={quickPhrasesButtonRef}
             setInputValue={setText}
             resizeTextArea={resizeTextArea}
@@ -982,7 +1014,7 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
         )
       case 'clear_topic':
         return (
-          <Tooltip placement="top" title={t('chat.input.clear', { Command: cleanTopicShortcut })} arrow>
+          <Tooltip key={icon.id} placement="top" title={t('chat.input.clear', { Command: cleanTopicShortcut })} arrow>
             <ToolbarButton type="text" onClick={clearTopic}>
               <PaintbrushVertical size={18} />
             </ToolbarButton>
@@ -990,51 +1022,67 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
         )
       case 'expand_collapse':
         return (
-          <Tooltip placement="top" title={isExpended ? t('chat.input.collapse') : t('chat.input.expand')} arrow>
+          <Tooltip key={icon.id} placement="top" title={isExpended ? t('chat.input.collapse') : t('chat.input.expand')} arrow>
             <ToolbarButton type="text" onClick={onToggleExpended}>
               {isExpended ? <Minimize size={18} /> : <Maximize size={18} />}
             </ToolbarButton>
           </Tooltip>
         )
       case 'new_context':
-        return <NewContextButton onNewContext={onNewContext} ToolbarButton={ToolbarButton} />
+        return (
+          <NewContextButton
+            key={icon.id}
+            onNewContext={onNewContext}
+            ToolbarButton={ToolbarButton}
+          />
+        )
       case 'token_count':
-        return showInputEstimatedTokens ? (
+        return (
           <TokenCount
+            key={icon.id}
             estimateTokenCount={estimateTokenCount}
             inputTokenCount={inputTokenCount}
             contextCount={contextCount}
             ToolbarButton={ToolbarButton}
             onClick={onNewContext}
           />
-        ) : null
-      case 'translate':
-        return <TranslateButton text={text} onTranslated={onTranslated} isLoading={isTranslating} />
-      case 'send_pause':
-        return (
-          <>
-            {loading && (
-              <Tooltip placement="top" title={t('chat.input.pause')} arrow>
-                <ToolbarButton type="text" onClick={onPause} style={{ marginRight: -2, marginTop: 1 }}>
-                  <CirclePause style={{ color: 'var(--color-error)', fontSize: 20 }} />
-                </ToolbarButton>
-              </Tooltip>
-            )}
-            {!loading && <SendMessageButton sendMessage={sendMessage} disabled={loading || inputEmpty} />}
-          </>
         )
+      case 'translate':
+        return (
+          <TranslateButton
+            key={icon.id}
+            text={text}
+            onTranslated={onTranslated}
+            isLoading={isTranslating}
+          />
+        )
+      case 'send_pause':
+        if (loading) {
+          return (
+            <Tooltip key={icon.id} placement="top" title={t('chat.input.pause')} arrow>
+              <ToolbarButton type="text" onClick={onPause} style={{ marginRight: -2, marginTop: 1 }}>
+                <CirclePause style={{ color: 'var(--color-error)', fontSize: 20 }} />
+              </ToolbarButton>
+            </Tooltip>
+          )
+        } else {
+          return (
+            <SendMessageButton
+              key={icon.id}
+              sendMessage={sendMessage}
+              disabled={loading || inputEmpty}
+            />
+          )
+        }
       default:
         return null
     }
   }, [
-    t, newTopicShortcut, addNewTopic, attachmentButtonRef, model, files, setFiles, ToolbarButton,
-    showThinkingButton, thinkingButtonRef, assistant, webSearchButtonRef, showKnowledgeIcon,
-    knowledgeBaseButtonRef, selectedKnowledgeBases, handleKnowledgeBaseSelect, activedMcpServers,
-    mcpToolsButtonRef, setText, resizeTextArea, onEnableGenerateImage, mentionModelsButtonRef,
-    mentionModels, onMentionModel, quickPhrasesButtonRef, cleanTopicShortcut, clearTopic,
-    isExpended, onToggleExpended, onNewContext, showInputEstimatedTokens, estimateTokenCount,
-    inputTokenCount, contextCount, text, onTranslated, isTranslating, loading, onPause,
-    sendMessage, inputEmpty
+    t, newTopicShortcut, addNewTopic, model, files, setFiles, assistant, selectedKnowledgeBases,
+    handleKnowledgeBaseSelect, setText, resizeTextArea, mentionModels, onMentionModel,
+    onEnableGenerateImage, cleanTopicShortcut, clearTopic, isExpended, onToggleExpended,
+    onNewContext, estimateTokenCount, inputTokenCount, contextCount, text, onTranslated,
+    isTranslating, loading, onPause, sendMessage, inputEmpty
   ])
 
   return (
@@ -1088,18 +1136,10 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
           </DragHandle>
           <Toolbar>
             <ToolbarMenu>
-              {inputBoxIcons.leftIcons.map((icon) => (
-                <React.Fragment key={icon.id}>
-                  {renderIconComponent(icon.id)}
-                </React.Fragment>
-              ))}
+              {inputBoxIcons.leftIcons.map((icon) => renderToolbarButton(icon))}
             </ToolbarMenu>
             <ToolbarMenu>
-              {inputBoxIcons.rightIcons.map((icon) => (
-                <React.Fragment key={icon.id}>
-                  {renderIconComponent(icon.id)}
-                </React.Fragment>
-              ))}
+              {inputBoxIcons.rightIcons.map((icon) => renderToolbarButton(icon))}
             </ToolbarMenu>
           </Toolbar>
         </InputBarContainer>
@@ -1189,7 +1229,7 @@ const ToolbarMenu = styled.div`
   gap: 6px;
 `
 
-const ToolbarButton = styled(Button)`
+export const ToolbarButton = styled(Button)`
   width: 30px;
   height: 30px;
   font-size: 16px;
@@ -1230,5 +1270,4 @@ const ToolbarButton = styled(Button)`
   }
 `
 
-export { ToolbarButton }
 export default Inputbar
